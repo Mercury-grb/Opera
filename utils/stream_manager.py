@@ -126,6 +126,33 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
 
 
 def _ytdlp_extract(query: str) -> dict:
+    """Bypass YouTube's IP blocks using the Piped API for direct links."""
+    # Extract the raw ID if a full URL is passed
+    yt_id = query.replace("https://www.youtube.com/watch?v=", "").replace("https://youtu.be/", "").split("&")[0]
+    
+    try:
+        # Route the request through a public Piped proxy
+        res = requests.get(f"https://pipedapi.kavin.rocks/streams/{yt_id}", timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        
+        # Grab the highest bitrate audio stream
+        audio_streams = data.get("audioStreams", [])
+        if not audio_streams:
+            raise ValueError("No audio streams available on proxy")
+            
+        best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
+        
+        return {
+            "title": data.get("title", query),
+            "duration": data.get("duration", 0),
+            "url": best_audio["url"],
+            "webpage_url": f"https://youtube.com/watch?v={yt_id}",
+        }
+    except Exception as e:
+        log.error(f"[PIPED] Proxy extraction failed: {e}")
+        # Let it crash gracefully or return a fallback dictionary
+        raise e
     ydl_opts = {
         "format": "bestaudio/best",
         "noplaylist": True,
