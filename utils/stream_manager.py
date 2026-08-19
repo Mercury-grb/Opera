@@ -6,6 +6,7 @@ import json
 import os
 import logging
 import re
+import yt_dlp
 import aiohttp
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -23,7 +24,6 @@ now_playing: dict[int, dict] = {}
 repeat_flags: dict[int, bool] = {}
 
 async def _resolve_via_jiosaavn(query: str) -> dict | None:
-    """Resolve track using JioSaavn, including thumbnail extraction."""
     try:
         results = await _saavn.search_songs(query)
     except Exception as e:
@@ -35,7 +35,6 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
         return None
 
     song = songs[0]
-
     url = None
     if isinstance(song.get("downloadUrl"), list) and song["downloadUrl"]:
         url = song["downloadUrl"][-1].get("link") or song["downloadUrl"][-1].get("url")
@@ -55,7 +54,6 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
     except (TypeError, ValueError):
         duration = 0
 
-    # Extract the highest quality thumbnail
     image_url = None
     if isinstance(song.get("image"), list) and song["image"]:
         image_url = song["image"][-1].get("link") or song["image"][-1].get("url")
@@ -71,8 +69,8 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
         "thumbnail": image_url
     }
 
-async def _piped_extract_async(query: str) -> dict:
-    """Async proxy extraction using multiple Piped APIs to bypass IP blocks."""
+async def _piped_url_extract_async(yt_id: str) -> dict:
+    """Async proxy extraction using Piped API specifically for direct YouTube URLs."""
     instances = [
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.tokhmi.xyz",
@@ -82,31 +80,6 @@ async def _piped_extract_async(query: str) -> dict:
     ]
     
     async with aiohttp.ClientSession() as session:
-        # Detect if query is a URL or a text search
-        if "youtube.com" in query or "youtu.be" in query:
-            if "v=" in query:
-                yt_id = query.split("v=")[-1].split("&")[0]
-            else:
-                yt_id = query.split("/")[-1].split("?")[0]
-        else:
-            yt_id = None
-            # Search for the video ID using the proxy
-            for base_url in instances:
-                try:
-                    search_url = f"{base_url}/search?q={query}&filter=videos"
-                    async with session.get(search_url, timeout=10) as res:
-                        if res.status == 200:
-                            data = await res.json()
-                            if data.get("items"):
-                                yt_id = data["items"][0]["url"].split("v=")[-1]
-                                break
-                except Exception:
-                    continue
-                    
-            if not yt_id:
-                raise ValueError(f"Could not find search results for '{query}'.")
-
-        # Extract the highest quality audio stream and thumbnail
         for base_url in instances:
             try:
                 stream_url = f"{base_url}/streams/{yt_id}"
@@ -117,7 +90,7 @@ async def _piped_extract_async(query: str) -> dict:
                         if audio_streams:
                             best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
                             return {
-                                "title": data.get("title", query),
+                                "title": data.get("title", "YouTube Audio"),
                                 "duration": data.get("duration", 0),
                                 "url": best_audio["url"],
                                 "webpage_url": f"https://youtube.com/watch?v={yt_id}",
@@ -126,19 +99,58 @@ async def _piped_extract_async(query: str) -> dict:
             except Exception:
                 continue
                 
-        raise ValueError("Failed to fetch audio stream. Proxies may be overloaded.")
+    raise ValueError("Failed to fetch YouTube link. Proxies may be overloaded.")
+
+def _sc_extract(query: str) -> dict:
+    """Fallback to SoundCloud via yt-dlp for text searches (Bypasses Render IP bans)."""
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "default_search": "scsearch",
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(query, download=False)
+        if "entries" in info:
+            if not info["entries"]:
+                raise ValueError(f"No results found on SoundCloud for '{query}'.")
+            info = info["entries"][0]
+            
+        return {
+            "title": info.get("title") or query,
+            "duration": info.get("duration") or 0,
+            "url": info.get("url"),
+            "thumbnail": info.get("thumbnail"),
+            "webpage_url": info.get("webpage_url"),
+        }
 
 async def resolve_track(query: str, requested_by: str) -> dict:
+    # 1. Handle direct YouTube URLs via Proxy
+    if "youtube.com" in query or "youtu.be" in query:
+        if "v=" in query:
+            yt_id = query.split("v=")[-1].split("&")[0]
+        else:
+            yt_id = query.split("/")[-1].split("?")[0]
+            
+        log.info(f"[STREAM] YouTube URL detected, routing ID {yt_id} through Piped Proxy")
+        info = await _piped_url_extract_async(yt_id)
+        info["requested_by"] = requested_by
+        info["source"] = "youtube_proxy"
+        return info
+
+    # 2. Handle Text Searches via JioSaavn First
     saavn_track = await _resolve_via_jiosaavn(query)
     if saavn_track:
         saavn_track["requested_by"] = requested_by
         saavn_track["source"] = "jiosaavn"
         return saavn_track
 
-    log.info(f"[STREAM] '{query}' not found on JioSaavn, routing through Piped Proxy")
-    info = await _piped_extract_async(query)
+    # 3. Fallback Text Searches to SoundCloud
+    log.info(f"[STREAM] '{query}' not found on JioSaavn, routing to SoundCloud")
+    info = await asyncio.to_thread(_sc_extract, query)
     info["requested_by"] = requested_by
-    info["source"] = "youtube_proxy"
+    info["source"] = "soundcloud"
     
     return info
 
@@ -232,4 +244,3 @@ def delete_playlist(user_id: int, name: str) -> bool:
         _save_playlists(data)
         return True
     return False
-        
