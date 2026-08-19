@@ -1,15 +1,12 @@
 """
 Core state + logic for voice-chat streaming: search, queue, playlists.
-Kept separate from plugins/vc_stream.py (the command handlers) so the
-handlers stay focused on Telegram-facing concerns.
 """
 import asyncio
 import json
 import os
-import shutil
 import logging
 import re
-import yt_dlp
+import aiohttp
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from jiosaavn import JioSaavn
@@ -18,76 +15,15 @@ import config
 log = logging.getLogger("bot")
 
 _saavn = JioSaavn()
-
 PLAYLISTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playlists.json")
-_WRITABLE_COOKIES_PATH = "/tmp/cookies.txt"
 
-
-import requests # You might need to add this to your requirements.txt
-
-_WRITABLE_COOKIES_PATH = "/tmp/cookies.txt"
-
-def _get_writable_cookies_path() -> str | None:
-    """Checks for a local file, or downloads from COOKIES_LINK if provided."""
-    
-    # 1. Try to download the cookies dynamically (The Flora Method)
-    cookies_link = os.environ.get("COOKIES_LINK")
-    if cookies_link:
-        try:
-            log.info("[YTDLP] Downloading fresh cookies from COOKIES_LINK...")
-            response = requests.get(cookies_link, timeout=10)
-            response.raise_for_status() # Crash if the link is bad
-            
-            with open(_WRITABLE_COOKIES_PATH, "w") as f:
-                f.write(response.text)
-            return _WRITABLE_COOKIES_PATH
-        except Exception as e:
-            log.error(f"[YTDLP] Failed to download cookies from link: {e}")
-            # If download fails, we continue and try the local file fallback
-    
-    # 2. Fallback to local files if no link is provided
-    source = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    if os.path.exists(source):
-        try:
-            if (
-                not os.path.exists(_WRITABLE_COOKIES_PATH)
-                or os.path.getmtime(source) > os.path.getmtime(_WRITABLE_COOKIES_PATH)
-            ):
-                shutil.copyfile(source, _WRITABLE_COOKIES_PATH)
-            return _WRITABLE_COOKIES_PATH
-        except Exception as e:
-            log.error(f"[YTDLP] Failed to copy cookies file: {e}")
-            
-    return None
-    
-
-
-# --- Per-chat state, all in memory ---
-# queues[chat_id]      -> list of track dicts OR raw search-query strings,
-#                         waiting to play. Resolved (yt-dlp searched) lazily,
-#                         right before each one plays — not all upfront.
-# now_playing[chat_id] -> dict describing the currently playing track, or
-#                         absent if nothing is playing. Deleted entirely once
-#                         the track finishes (per your requirement — no
-#                         leftover data for a finished song).
-# repeat[chat_id]      -> bool, whether to replay the current track on end
+# --- Per-chat state ---
 queues: dict[int, list] = {}
 now_playing: dict[int, dict] = {}
 repeat_flags: dict[int, bool] = {}
 
-
 async def _resolve_via_jiosaavn(query: str) -> dict | None:
-    """Try JioSaavn first — it has none of YouTube's anti-scraping/SABR/
-    datacenter-IP-blocking issues, since it's a much less aggressively
-    protected catalog. Returns None (not an exception) if not found, so
-    the caller can fall back to YouTube.
-
-    NOTE: JioSaavn's API isn't officially documented, and different forks
-    of the unofficial wrapper libraries use slightly different field
-    names for the direct media URL. This defensively checks a few common
-    field names and logs the raw result if none match, so a mismatch is
-    a one-line fix instead of a mystery.
-    """
+    """Resolve track using JioSaavn, including thumbnail extraction."""
     try:
         results = await _saavn.search_songs(query)
     except Exception as e:
@@ -100,11 +36,8 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
 
     song = songs[0]
 
-    # Different field names show up across JioSaavn wrapper versions —
-    # try the common ones in order.
     url = None
     if isinstance(song.get("downloadUrl"), list) and song["downloadUrl"]:
-        # Usually a list of {quality, link} sorted low->high quality.
         url = song["downloadUrl"][-1].get("link") or song["downloadUrl"][-1].get("url")
     elif isinstance(song.get("download_url"), list) and song["download_url"]:
         url = song["download_url"][-1].get("link") or song["download_url"][-1].get("url")
@@ -112,83 +45,88 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
         url = song.get("media_url") or song.get("media_preview_url") or song.get("url")
 
     if not url:
-        log.warning(f"[JIOSAAVN] Found a result but couldn't locate a media URL field. Raw result: {json.dumps(song)[:500]}")
         return None
 
     title = song.get("song") or song.get("name") or song.get("title") or query
+    
     duration = song.get("duration") or 0
     try:
         duration = int(duration)
     except (TypeError, ValueError):
         duration = 0
 
-    return {"title": title, "duration": duration, "url": url}
+    # Extract the highest quality thumbnail
+    image_url = None
+    if isinstance(song.get("image"), list) and song["image"]:
+        image_url = song["image"][-1].get("link") or song["image"][-1].get("url")
+    elif isinstance(song.get("image_url"), list) and song["image_url"]:
+        image_url = song["image_url"][-1].get("link") or song["image_url"][-1].get("url")
+    elif isinstance(song.get("image"), str):
+        image_url = song.get("image")
 
-
-def _ytdlp_extract(query: str) -> dict:
-    """Bypass YouTube's IP blocks using the Piped API for direct links."""
-    # Extract the raw ID if a full URL is passed
-    yt_id = query.replace("https://www.youtube.com/watch?v=", "").replace("https://youtu.be/", "").split("&")[0]
-    
-    try:
-        # Route the request through a public Piped proxy
-        res = requests.get(f"https://pipedapi.kavin.rocks/streams/{yt_id}", timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        
-        # Grab the highest bitrate audio stream
-        audio_streams = data.get("audioStreams", [])
-        if not audio_streams:
-            raise ValueError("No audio streams available on proxy")
-            
-        best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
-        
-        return {
-            "title": data.get("title", query),
-            "duration": data.get("duration", 0),
-            "url": best_audio["url"],
-            "webpage_url": f"https://youtube.com/watch?v={yt_id}",
-        }
-    except Exception as e:
-        log.error(f"[PIPED] Proxy extraction failed: {e}")
-        # Let it crash gracefully or return a fallback dictionary
-        raise e
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "default_search": "ytsearch",
-        "extractor_args": {
-            "youtube": {
-                # Prioritize 'web' or use 'default'. 
-                # 'android' often hides 'bestaudio' formats now.
-                "player_client": ["web", "default"], 
-            },
-            "youtubepot-bgutilscript": {
-                "script_path": ["auto"],
-            },
-        },
+    return {
+        "title": title, 
+        "duration": duration, 
+        "url": url,
+        "thumbnail": image_url
     }
-    # ... rest of your code ...
+
+async def _piped_extract_async(query: str) -> dict:
+    """Async proxy extraction using multiple Piped APIs to bypass IP blocks."""
+    instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.tokhmi.xyz",
+        "https://pipedapi.syncpundit.io",
+        "https://pipedapi.adminforge.de",
+        "https://api.piped.yt"
+    ]
     
-    # Cookies fallback for YouTube's bot detection — see
-    # _get_writable_cookies_path() for why we copy it to /tmp first.
-    cookies_file = _get_writable_cookies_path()
-    if cookies_file:
-        ydl_opts["cookiefile"] = cookies_file
+    async with aiohttp.ClientSession() as session:
+        # Detect if query is a URL or a text search
+        if "youtube.com" in query or "youtu.be" in query:
+            if "v=" in query:
+                yt_id = query.split("v=")[-1].split("&")[0]
+            else:
+                yt_id = query.split("/")[-1].split("?")[0]
+        else:
+            yt_id = None
+            # Search for the video ID using the proxy
+            for base_url in instances:
+                try:
+                    search_url = f"{base_url}/search?q={query}&filter=videos"
+                    async with session.get(search_url, timeout=10) as res:
+                        if res.status == 200:
+                            data = await res.json()
+                            if data.get("items"):
+                                yt_id = data["items"][0]["url"].split("v=")[-1]
+                                break
+                except Exception:
+                    continue
+                    
+            if not yt_id:
+                raise ValueError(f"Could not find search results for '{query}'.")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        if "entries" in info:
-            info = info["entries"][0]
-        return {
-            "title": info.get("title") or query,
-            "duration": info.get("duration") or 0,
-            "url": info.get("url"),
-            "webpage_url": info.get("webpage_url"),
-        }
-
+        # Extract the highest quality audio stream and thumbnail
+        for base_url in instances:
+            try:
+                stream_url = f"{base_url}/streams/{yt_id}"
+                async with session.get(stream_url, timeout=10) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        audio_streams = data.get("audioStreams", [])
+                        if audio_streams:
+                            best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
+                            return {
+                                "title": data.get("title", query),
+                                "duration": data.get("duration", 0),
+                                "url": best_audio["url"],
+                                "webpage_url": f"https://youtube.com/watch?v={yt_id}",
+                                "thumbnail": data.get("thumbnailUrl")
+                            }
+            except Exception:
+                continue
+                
+        raise ValueError("Failed to fetch audio stream. Proxies may be overloaded.")
 
 async def resolve_track(query: str, requested_by: str) -> dict:
     saavn_track = await _resolve_via_jiosaavn(query)
@@ -197,30 +135,21 @@ async def resolve_track(query: str, requested_by: str) -> dict:
         saavn_track["source"] = "jiosaavn"
         return saavn_track
 
-    log.info(f"[STREAM] '{query}' not found on JioSaavn, falling back to YouTube")
-    info = await asyncio.to_thread(_ytdlp_extract, query)
-    return {
-        "title": info["title"],
-        "duration": info["duration"],
-        "url": info["url"],
-        "requested_by": requested_by,
-        "source": "youtube",
-        "thumbnail": info.get("thumbnail"),
-    }
-
+    log.info(f"[STREAM] '{query}' not found on JioSaavn, routing through Piped Proxy")
+    info = await _piped_extract_async(query)
+    info["requested_by"] = requested_by
+    info["source"] = "youtube_proxy"
+    
+    return info
 
 def format_duration(seconds: int) -> str:
     seconds = int(seconds or 0)
     m, s = divmod(seconds, 60)
     return f"{m}:{s:02d}"
 
-
 def enqueue(chat_id: int, item) -> int:
-    """item can be a resolved track dict or a raw query string. Returns the
-    new queue length (position)."""
     queues.setdefault(chat_id, []).append(item)
     return len(queues[chat_id])
-
 
 def pop_next(chat_id: int):
     q = queues.get(chat_id)
@@ -228,16 +157,13 @@ def pop_next(chat_id: int):
         return None
     return q.pop(0)
 
-
 def clear_chat(chat_id: int):
     queues.pop(chat_id, None)
     now_playing.pop(chat_id, None)
     repeat_flags.pop(chat_id, None)
 
-
-# --- Spotify playlist fetching (for /saveplaylist) ---
+# --- Spotify playlist fetching ---
 _SPOTIFY_URL_RE = re.compile(r"playlist/([a-zA-Z0-9]+)")
-
 
 def _spotify_client():
     return spotipy.Spotify(
@@ -247,10 +173,7 @@ def _spotify_client():
         )
     )
 
-
 def _fetch_spotify_tracks(playlist_url: str) -> list[str]:
-    """Blocking — always call via asyncio.to_thread. Returns a list of
-    "<track name> <artist>" search-query strings, one per track."""
     match = _SPOTIFY_URL_RE.search(playlist_url)
     if not match:
         raise ValueError("That doesn't look like a valid Spotify playlist URL.")
@@ -270,12 +193,10 @@ def _fetch_spotify_tracks(playlist_url: str) -> list[str]:
         results = sp.next(results) if results.get("next") else None
     return queries
 
-
 async def fetch_spotify_tracks(playlist_url: str) -> list[str]:
     return await asyncio.to_thread(_fetch_spotify_tracks, playlist_url)
 
-
-# --- Playlist persistence (simple JSON file, keyed by user id) ---
+# --- Playlist persistence ---
 def _load_playlists() -> dict:
     if not os.path.exists(PLAYLISTS_FILE):
         return {}
@@ -286,27 +207,22 @@ def _load_playlists() -> dict:
         log.error(f"[PLAYLIST] Failed to load {PLAYLISTS_FILE}: {e}")
         return {}
 
-
 def _save_playlists(data: dict):
     with open(PLAYLISTS_FILE, "w") as f:
         json.dump(data, f, indent=2)
-
 
 def save_playlist(user_id: int, name: str, tracks: list[str]):
     data = _load_playlists()
     data.setdefault(str(user_id), {})[name] = tracks
     _save_playlists(data)
 
-
 def get_playlist(user_id: int, name: str) -> list[str] | None:
     data = _load_playlists()
     return data.get(str(user_id), {}).get(name)
 
-
 def list_playlists(user_id: int) -> list[str]:
     data = _load_playlists()
     return list(data.get(str(user_id), {}).keys())
-
 
 def delete_playlist(user_id: int, name: str) -> bool:
     data = _load_playlists()
@@ -316,3 +232,4 @@ def delete_playlist(user_id: int, name: str) -> bool:
         _save_playlists(data)
         return True
     return False
+        
