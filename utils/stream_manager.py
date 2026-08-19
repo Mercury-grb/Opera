@@ -158,6 +158,7 @@ async def resolve_track(query: str, requested_by: str) -> dict:
         "url": info["url"],
         "requested_by": requested_by,
         "source": "youtube",
+        "thumbnail": info.get("thumbnail"),
     }
 
 
