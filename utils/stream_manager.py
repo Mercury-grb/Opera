@@ -6,6 +6,7 @@ handlers stay focused on Telegram-facing concerns.
 import asyncio
 import json
 import os
+import shutil
 import logging
 import re
 import yt_dlp
@@ -16,6 +17,27 @@ import config
 log = logging.getLogger("bot")
 
 PLAYLISTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playlists.json")
+_WRITABLE_COOKIES_PATH = "/tmp/cookies.txt"
+
+
+def _get_writable_cookies_path() -> str | None:
+    """Render's Secret Files are mounted read-only, but yt-dlp can try to
+    write updated cookies back to the file it reads from — which fails on
+    a read-only mount. Copy it to /tmp once (re-copies if the source
+    changes) and hand yt-dlp that writable copy instead."""
+    source = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    if not os.path.exists(source):
+        return None
+    try:
+        if (
+            not os.path.exists(_WRITABLE_COOKIES_PATH)
+            or os.path.getmtime(source) > os.path.getmtime(_WRITABLE_COOKIES_PATH)
+        ):
+            shutil.copyfile(source, _WRITABLE_COOKIES_PATH)
+        return _WRITABLE_COOKIES_PATH
+    except Exception as e:
+        log.error(f"[YTDLP] Failed to copy cookies file to writable path: {e}")
+        return None
 
 # --- Per-chat state, all in memory ---
 # queues[chat_id]      -> list of track dicts OR raw search-query strings,
@@ -49,15 +71,10 @@ def _ytdlp_extract(query: str) -> dict:
             }
         },
     }
-    # Cookies fallback for YouTube's bot detection. Checks, in order:
-    #   1. COOKIES_FILE env var, if set
-    #   2. Render's Secret Files default mount path (/etc/secrets/cookies.txt)
-    # Export cookies.txt from a logged-in YouTube session (e.g. via the
-    # "Get cookies.txt LOCALLY" browser extension) and add it as a Secret
-    # File named "cookies.txt" in Render's dashboard — no code change or
-    # git commit needed, it just appears at the path below.
-    cookies_file = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    if cookies_file and os.path.exists(cookies_file):
+    # Cookies fallback for YouTube's bot detection — see
+    # _get_writable_cookies_path() for why we copy it to /tmp first.
+    cookies_file = _get_writable_cookies_path()
+    if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
