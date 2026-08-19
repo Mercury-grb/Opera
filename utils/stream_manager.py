@@ -111,7 +111,7 @@ def _ytdlp_extract(query: str) -> dict:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "default_search": "ytsearch",
+        "default_search": "scsearch",
         "extractor_args": {
             "youtube": {
                 # Prioritize 'web' or use 'default'. 
