@@ -1,4 +1,4 @@
-FROM python:3.10-bullseye
+FROM python:3.11-bullseye
 
 # Install build dependencies, git, and FFmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
