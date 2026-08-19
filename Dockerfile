@@ -12,6 +12,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopus-dev \
     libffi-dev \
     libssl-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js — required by the bgutil PO-token-provider plugin (see
+# requirements.txt) to work around YouTube's SABR streaming enforcement.
+# As of late 2025/2026, YouTube requires a valid PO (Proof-of-Origin) token
+# to serve real audio/video URLs; without one it silently falls back to
+# storyboard/image-only formats, which is what "Requested format is not
+# available" actually means under the hood. This isn't specific to this
+# bot — it's an active, ongoing fight between YouTube and every yt-dlp
+# user right now. bgutil generates valid tokens locally via a small
+# bundled JS script, which needs a JS runtime present.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
