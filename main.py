@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from aiohttp import web
 from aiogram import Bot, Dispatcher
@@ -20,9 +21,6 @@ bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseM
 dp = Dispatcher()
 
 # --- Register plugin routers ---
-# Each converted plugin exposes a `router` (aiogram's equivalent of a
-# pyrogram plugin module of handlers). Add new ones here as they're
-# converted from pyrogram to aiogram.
 from plugins.start import router as start_router
 from plugins.admin import router as admin_router
 from plugins.tools.ping import router as ping_router
@@ -58,8 +56,6 @@ async def on_shutdown(bot: Bot):
         if assistant.is_connected:
             await assistant.stop()
     except Exception as e:
-        # Same harmless pytgcalls/pyrogram loop artifact we saw before —
-        # logged, not fatal.
         log.warning(f"[SHUTDOWN] Error stopping assistant (likely harmless): {e}")
     log.info("[INFO] Shutdown complete.")
 
@@ -72,7 +68,17 @@ async def handle_health(request):
     return web.Response(text="Bot is alive!")
 
 
-def main():
+# --- Entrypoint ---
+# IMPORTANT: we manage the event loop ourselves with a single asyncio.run()
+# call at the bottom of this file, instead of using aiohttp's web.run_app()
+# helper. web.run_app() manages its own event loop lifecycle internally,
+# which is a DIFFERENT loop than whatever was active when `assistant =
+# Client(...)` was constructed at import time in clients.py. That mismatch
+# is exactly the "attached to a different loop" bug we've hit before with
+# pyrogram — the fix is the same: one explicit, persistent loop for the
+# whole process, set up manually with AppRunner/TCPSite instead of a
+# high-level sync wrapper that hides its own loop creation.
+async def main():
     app = web.Application()
     app.router.add_get("/", handle_health)
 
@@ -80,10 +86,22 @@ def main():
     webhook_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 
+    runner = web.AppRunner(app)
+    await runner.setup()
+
     port = int(os.environ.get("PORT", 8080))
-    log.info(f"[INFO] Starting web app on port {port}")
-    web.run_app(app, host="0.0.0.0", port=port)
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"[INFO] Web app listening on port {port}")
+
+    # Keep the process alive; aiogram's on_startup already ran via
+    # setup_application's aiohttp on_startup hook, on this same loop.
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
