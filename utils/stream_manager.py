@@ -62,12 +62,15 @@ def _ytdlp_extract(query: str) -> dict:
         "no_warnings": True,
         "default_search": "ytsearch",
         # YouTube's bot detection ("Sign in to confirm you're not a bot")
-        # is common on datacenter IPs like Render's. Requesting the
-        # android/ios player client instead of the default web client
-        # often avoids that check entirely, with no cookies needed.
+        # is common on datacenter IPs like Render's. The android/ios player
+        # clients often avoid it without cookies, but can return a
+        # narrower format list for some videos ("Requested format is not
+        # available"). Now that cookies are configured (see below), it's
+        # safe to include the web client too — cookies cover its bot-check
+        # — which gives yt-dlp more formats to choose from per video.
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"],
+                "player_client": ["android", "web", "ios"],
             }
         },
     }
