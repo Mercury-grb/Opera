@@ -12,9 +12,12 @@ import re
 import yt_dlp
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+from jiosaavn import JioSaavn
 import config
 
 log = logging.getLogger("bot")
+
+_saavn = JioSaavn()
 
 PLAYLISTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playlists.json")
 _WRITABLE_COOKIES_PATH = "/tmp/cookies.txt"
@@ -51,6 +54,55 @@ def _get_writable_cookies_path() -> str | None:
 queues: dict[int, list] = {}
 now_playing: dict[int, dict] = {}
 repeat_flags: dict[int, bool] = {}
+
+
+async def _resolve_via_jiosaavn(query: str) -> dict | None:
+    """Try JioSaavn first — it has none of YouTube's anti-scraping/SABR/
+    datacenter-IP-blocking issues, since it's a much less aggressively
+    protected catalog. Returns None (not an exception) if not found, so
+    the caller can fall back to YouTube.
+
+    NOTE: JioSaavn's API isn't officially documented, and different forks
+    of the unofficial wrapper libraries use slightly different field
+    names for the direct media URL. This defensively checks a few common
+    field names and logs the raw result if none match, so a mismatch is
+    a one-line fix instead of a mystery.
+    """
+    try:
+        results = await _saavn.search_songs(query)
+    except Exception as e:
+        log.warning(f"[JIOSAAVN] Search failed for '{query}': {e}")
+        return None
+
+    songs = results.get("results") if isinstance(results, dict) else results
+    if not songs:
+        return None
+
+    song = songs[0]
+
+    # Different field names show up across JioSaavn wrapper versions —
+    # try the common ones in order.
+    url = None
+    if isinstance(song.get("downloadUrl"), list) and song["downloadUrl"]:
+        # Usually a list of {quality, link} sorted low->high quality.
+        url = song["downloadUrl"][-1].get("link") or song["downloadUrl"][-1].get("url")
+    elif isinstance(song.get("download_url"), list) and song["download_url"]:
+        url = song["download_url"][-1].get("link") or song["download_url"][-1].get("url")
+    else:
+        url = song.get("media_url") or song.get("media_preview_url") or song.get("url")
+
+    if not url:
+        log.warning(f"[JIOSAAVN] Found a result but couldn't locate a media URL field. Raw result: {json.dumps(song)[:500]}")
+        return None
+
+    title = song.get("song") or song.get("name") or song.get("title") or query
+    duration = song.get("duration") or 0
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError):
+        duration = 0
+
+    return {"title": title, "duration": duration, "url": url}
 
 
 def _ytdlp_extract(query: str) -> dict:
@@ -101,12 +153,20 @@ def _ytdlp_extract(query: str) -> dict:
 
 
 async def resolve_track(query: str, requested_by: str) -> dict:
+    saavn_track = await _resolve_via_jiosaavn(query)
+    if saavn_track:
+        saavn_track["requested_by"] = requested_by
+        saavn_track["source"] = "jiosaavn"
+        return saavn_track
+
+    log.info(f"[STREAM] '{query}' not found on JioSaavn, falling back to YouTube")
     info = await asyncio.to_thread(_ytdlp_extract, query)
     return {
         "title": info["title"],
         "duration": info["duration"],
         "url": info["url"],
         "requested_by": requested_by,
+        "source": "youtube",
     }
 
 
