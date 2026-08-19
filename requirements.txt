@@ -8,3 +8,4 @@ aiosqlite
 pillow
 aiohttp
 aiogram
+kurigram
