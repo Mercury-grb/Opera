@@ -39,7 +39,23 @@ def _ytdlp_extract(query: str) -> dict:
         "quiet": True,
         "no_warnings": True,
         "default_search": "ytsearch",
+        # YouTube's bot detection ("Sign in to confirm you're not a bot")
+        # is common on datacenter IPs like Render's. Requesting the
+        # android/ios player client instead of the default web client
+        # often avoids that check entirely, with no cookies needed.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+            }
+        },
     }
+    # Optional fallback: if you export cookies.txt from a logged-in YouTube
+    # session and set COOKIES_FILE to its path, yt-dlp will use it. Only
+    # needed if the player_client workaround above stops being enough.
+    cookies_file = os.environ.get("COOKIES_FILE")
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts["cookiefile"] = cookies_file
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=False)
         if "entries" in info:
