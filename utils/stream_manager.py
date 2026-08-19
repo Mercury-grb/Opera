@@ -6,8 +6,9 @@ import json
 import os
 import logging
 import re
-import yt_dlp
+import urllib.parse
 import aiohttp
+import yt_dlp
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from jiosaavn import JioSaavn
@@ -23,11 +24,71 @@ queues: dict[int, list] = {}
 now_playing: dict[int, dict] = {}
 repeat_flags: dict[int, bool] = {}
 
+async def _piped_extract_async(query: str) -> dict:
+    """Async proxy extraction using multiple Piped APIs to bypass IP blocks."""
+    instances = [
+        "https://pipedapi.tokhmi.xyz",
+        "https://pipedapi.syncpundit.io",
+        "https://pipedapi.smnz.de",
+        "https://api.piped.yt",
+        "https://pipedapi.kavin.rocks" # Kavin is last because it frequently throws 525 errors
+    ]
+    
+    async with aiohttp.ClientSession() as session:
+        yt_id = None
+        
+        # 1. Detect if query is a URL or a Text Search
+        if "youtube.com" in query or "youtu.be" in query:
+            if "v=" in query:
+                yt_id = query.split("v=")[-1].split("&")[0]
+            else:
+                yt_id = query.split("/")[-1].split("?")[0]
+        else:
+            # It's a text search! Cycle through instances to find the video ID
+            safe_query = urllib.parse.quote(query)
+            for base_url in instances:
+                try:
+                    search_url = f"{base_url}/search?q={safe_query}&filter=videos"
+                    async with session.get(search_url, timeout=5) as res:
+                        if res.status == 200:
+                            data = await res.json()
+                            if data.get("items"):
+                                yt_id = data["items"][0]["url"].split("v=")[-1]
+                                break
+                except Exception:
+                    continue
+                    
+        if not yt_id:
+            raise ValueError(f"Could not find YouTube results for '{query}'.")
+
+        # 2. Extract the Audio Stream using the ID
+        for base_url in instances:
+            try:
+                stream_url = f"{base_url}/streams/{yt_id}"
+                async with session.get(stream_url, timeout=5) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        audio_streams = data.get("audioStreams", [])
+                        if audio_streams:
+                            best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
+                            return {
+                                "title": data.get("title", query),
+                                "duration": data.get("duration", 0),
+                                "url": best_audio["url"],
+                                "webpage_url": f"https://youtube.com/watch?v={yt_id}",
+                                "thumbnail": data.get("thumbnailUrl")
+                            }
+            except Exception:
+                continue
+                
+        raise ValueError("Failed to fetch audio stream. Proxies may be overloaded.")
+
 async def _resolve_via_jiosaavn(query: str) -> dict | None:
+    """Resolve track using JioSaavn, including thumbnail extraction."""
     try:
         results = await _saavn.search_songs(query)
     except Exception as e:
-        log.warning(f"[JIOSAAVN] Search failed for '{query}': {e}")
+        log.warning(f"[JIOSAAVN] Search failed: {e}")
         return None
 
     songs = results.get("results") if isinstance(results, dict) else results
@@ -69,38 +130,6 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
         "thumbnail": image_url
     }
 
-async def _piped_url_extract_async(yt_id: str) -> dict:
-    """Async proxy extraction using Piped API specifically for direct YouTube URLs."""
-    instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.tokhmi.xyz",
-        "https://pipedapi.syncpundit.io",
-        "https://pipedapi.adminforge.de",
-        "https://api.piped.yt"
-    ]
-    
-    async with aiohttp.ClientSession() as session:
-        for base_url in instances:
-            try:
-                stream_url = f"{base_url}/streams/{yt_id}"
-                async with session.get(stream_url, timeout=10) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        audio_streams = data.get("audioStreams", [])
-                        if audio_streams:
-                            best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
-                            return {
-                                "title": data.get("title", "YouTube Audio"),
-                                "duration": data.get("duration", 0),
-                                "url": best_audio["url"],
-                                "webpage_url": f"https://youtube.com/watch?v={yt_id}",
-                                "thumbnail": data.get("thumbnailUrl")
-                            }
-            except Exception:
-                continue
-                
-    raise ValueError("Failed to fetch YouTube link. Proxies may be overloaded.")
-
 def _sc_extract(query: str) -> dict:
     """Fallback to SoundCloud via yt-dlp for text searches (Bypasses Render IP bans)."""
     ydl_opts = {
@@ -109,12 +138,13 @@ def _sc_extract(query: str) -> dict:
         "quiet": True,
         "no_warnings": True,
         "default_search": "scsearch",
+        "socket_timeout": 5, # CRITICAL: Prevents yt-dlp from hanging infinitely
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=False)
         if "entries" in info:
             if not info["entries"]:
-                raise ValueError(f"No results found on SoundCloud for '{query}'.")
+                raise ValueError("No results found.")
             info = info["entries"][0]
             
         return {
@@ -126,33 +156,40 @@ def _sc_extract(query: str) -> dict:
         }
 
 async def resolve_track(query: str, requested_by: str) -> dict:
-    # 1. Handle direct YouTube URLs via Proxy
-    if "youtube.com" in query or "youtu.be" in query:
-        if "v=" in query:
-            yt_id = query.split("v=")[-1].split("&")[0]
-        else:
-            yt_id = query.split("/")[-1].split("?")[0]
-            
-        log.info(f"[STREAM] YouTube URL detected, routing ID {yt_id} through Piped Proxy")
-        info = await _piped_url_extract_async(yt_id)
+    """Bulletproof resolver that routes through 3 different platforms."""
+    
+    # Tier 1: Piped API (YouTube) - Best Catalog, Async, No IP blocks
+    try:
+        log.info(f"[STREAM] Routing '{query}' to Piped API")
+        info = await asyncio.wait_for(_piped_extract_async(query), timeout=15.0)
         info["requested_by"] = requested_by
         info["source"] = "youtube_proxy"
         return info
+    except Exception as e:
+        log.warning(f"Piped extraction failed: {e}")
 
-    # 2. Handle Text Searches via JioSaavn First
-    saavn_track = await _resolve_via_jiosaavn(query)
-    if saavn_track:
-        saavn_track["requested_by"] = requested_by
-        saavn_track["source"] = "jiosaavn"
-        return saavn_track
+    # Tier 2: JioSaavn - Fast native async, but library might be outdated
+    try:
+        log.info(f"[STREAM] Routing '{query}' to JioSaavn")
+        saavn_track = await asyncio.wait_for(_resolve_via_jiosaavn(query), timeout=5.0)
+        if saavn_track:
+            saavn_track["requested_by"] = requested_by
+            saavn_track["source"] = "jiosaavn"
+            return saavn_track
+    except Exception as e:
+        log.warning(f"JioSaavn failed: {e}")
 
-    # 3. Fallback Text Searches to SoundCloud
-    log.info(f"[STREAM] '{query}' not found on JioSaavn, routing to SoundCloud")
-    info = await asyncio.to_thread(_sc_extract, query)
-    info["requested_by"] = requested_by
-    info["source"] = "soundcloud"
-    
-    return info
+    # Tier 3: SoundCloud via yt-dlp - Huge catalog, but blocking.
+    try:
+        log.info(f"[STREAM] Routing '{query}' to SoundCloud")
+        info = await asyncio.wait_for(asyncio.to_thread(_sc_extract, query), timeout=10.0)
+        info["requested_by"] = requested_by
+        info["source"] = "soundcloud"
+        return info
+    except Exception as e:
+        log.warning(f"SoundCloud failed: {e}")
+
+    raise ValueError(f"Could not find or extract '{query}'. All search engines failed or timed out.")
 
 def format_duration(seconds: int) -> str:
     seconds = int(seconds or 0)
@@ -244,3 +281,4 @@ def delete_playlist(user_id: int, name: str) -> bool:
         _save_playlists(data)
         return True
     return False
+    
