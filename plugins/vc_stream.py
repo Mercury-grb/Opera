@@ -298,7 +298,7 @@ async def stream_controls(callback: CallbackQuery):
         except Exception as e:
             await callback.answer(f"Nothing to resume: {e}", show_alert=True)
 
-        elif action == "repeat":
+    elif action == "repeat":
         sm.repeat_flags[chat_id] = not sm.repeat_flags.get(chat_id, False)
         state = "on" if sm.repeat_flags[chat_id] else "off"
         await callback.answer(f"Repeat {state}")
