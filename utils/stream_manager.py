@@ -71,7 +71,15 @@ def _ytdlp_extract(query: str) -> dict:
         "extractor_args": {
             "youtube": {
                 "player_client": ["android", "web", "ios"],
-            }
+            },
+            # bgutil-ytdlp-pot-provider (installed via requirements.txt,
+            # requires Node.js — see Dockerfile) generates the PO token
+            # YouTube now requires to serve real formats. "script" mode
+            # runs its bundled JS directly via node with no separate
+            # server process to manage — simplest for a single container.
+            "youtubepot-bgutilscript": {
+                "script_path": ["auto"],
+            },
         },
     }
     # Cookies fallback for YouTube's bot detection — see
