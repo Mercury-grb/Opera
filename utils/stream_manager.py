@@ -49,10 +49,14 @@ def _ytdlp_extract(query: str) -> dict:
             }
         },
     }
-    # Optional fallback: if you export cookies.txt from a logged-in YouTube
-    # session and set COOKIES_FILE to its path, yt-dlp will use it. Only
-    # needed if the player_client workaround above stops being enough.
-    cookies_file = os.environ.get("COOKIES_FILE")
+    # Cookies fallback for YouTube's bot detection. Checks, in order:
+    #   1. COOKIES_FILE env var, if set
+    #   2. Render's Secret Files default mount path (/etc/secrets/cookies.txt)
+    # Export cookies.txt from a logged-in YouTube session (e.g. via the
+    # "Get cookies.txt LOCALLY" browser extension) and add it as a Secret
+    # File named "cookies.txt" in Render's dashboard — no code change or
+    # git commit needed, it just appears at the path below.
+    cookies_file = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts["cookiefile"] = cookies_file
 
