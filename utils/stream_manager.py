@@ -23,24 +23,44 @@ PLAYLISTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playl
 _WRITABLE_COOKIES_PATH = "/tmp/cookies.txt"
 
 
+import requests # You might need to add this to your requirements.txt
+
+_WRITABLE_COOKIES_PATH = "/tmp/cookies.txt"
+
 def _get_writable_cookies_path() -> str | None:
-    """Render's Secret Files are mounted read-only, but yt-dlp can try to
-    write updated cookies back to the file it reads from — which fails on
-    a read-only mount. Copy it to /tmp once (re-copies if the source
-    changes) and hand yt-dlp that writable copy instead."""
+    """Checks for a local file, or downloads from COOKIES_LINK if provided."""
+    
+    # 1. Try to download the cookies dynamically (The Flora Method)
+    cookies_link = os.environ.get("COOKIES_LINK")
+    if cookies_link:
+        try:
+            log.info("[YTDLP] Downloading fresh cookies from COOKIES_LINK...")
+            response = requests.get(cookies_link, timeout=10)
+            response.raise_for_status() # Crash if the link is bad
+            
+            with open(_WRITABLE_COOKIES_PATH, "w") as f:
+                f.write(response.text)
+            return _WRITABLE_COOKIES_PATH
+        except Exception as e:
+            log.error(f"[YTDLP] Failed to download cookies from link: {e}")
+            # If download fails, we continue and try the local file fallback
+    
+    # 2. Fallback to local files if no link is provided
     source = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    if not os.path.exists(source):
-        return None
-    try:
-        if (
-            not os.path.exists(_WRITABLE_COOKIES_PATH)
-            or os.path.getmtime(source) > os.path.getmtime(_WRITABLE_COOKIES_PATH)
-        ):
-            shutil.copyfile(source, _WRITABLE_COOKIES_PATH)
-        return _WRITABLE_COOKIES_PATH
-    except Exception as e:
-        log.error(f"[YTDLP] Failed to copy cookies file to writable path: {e}")
-        return None
+    if os.path.exists(source):
+        try:
+            if (
+                not os.path.exists(_WRITABLE_COOKIES_PATH)
+                or os.path.getmtime(source) > os.path.getmtime(_WRITABLE_COOKIES_PATH)
+            ):
+                shutil.copyfile(source, _WRITABLE_COOKIES_PATH)
+            return _WRITABLE_COOKIES_PATH
+        except Exception as e:
+            log.error(f"[YTDLP] Failed to copy cookies file: {e}")
+            
+    return None
+    
+
 
 # --- Per-chat state, all in memory ---
 # queues[chat_id]      -> list of track dicts OR raw search-query strings,
