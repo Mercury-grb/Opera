@@ -10,3 +10,4 @@ aiohttp
 aiogram
 Kurigram
 bgutil-ytdlp-pot-provider
+jiosaavn
