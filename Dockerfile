@@ -1,4 +1,8 @@
 FROM python:3.11-bullseye
+# Install Deno and FFmpeg (Required by yt-dlp)
+RUN apt-get update && apt-get install -y curl unzip ffmpeg
+RUN curl -fsSL https://deno.land/install.sh | sh
+ENV PATH="/root/.deno/bin:$PATH"
 
 # Install build dependencies, git, and FFmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
