@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 import config
-from clients import build_clients
+from clients import init_clients
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -24,10 +24,12 @@ dp = Dispatcher()
 from plugins.start import router as start_router
 from plugins.admin import router as admin_router
 from plugins.tools.ping import router as ping_router
+from plugins.vc_stream import router as vc_router, register_stream_end_handler
 
 dp.include_router(start_router)
 dp.include_router(admin_router)
 dp.include_router(ping_router)
+dp.include_router(vc_router)
 
 
 async def handle_health(request):
@@ -44,7 +46,7 @@ async def handle_health(request):
 # on_shutdown are defined here too (as closures) so they can reference
 # these same objects without relying on module-level globals.
 async def main():
-    assistant, call_py = build_clients()
+    assistant, call_py = init_clients()
 
     async def on_startup(bot: Bot):
         webhook_url = f"{PUBLIC_URL}{WEBHOOK_PATH}"
@@ -55,6 +57,8 @@ async def main():
         await assistant.start()
         log.info("[INFO] Starting PyTgCalls...")
         await call_py.start()
+        register_stream_end_handler()
+        log.info("[INFO] Stream-end handler registered")
         assistant_info = await assistant.get_me()
         log.info(f"[INFO] Assistant online as @{assistant_info.username}")
 
@@ -101,3 +105,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
