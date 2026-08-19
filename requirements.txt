@@ -8,6 +8,7 @@ aiosqlite
 pillow
 aiohttp
 aiogram
+pydantic>=2
 Kurigram
 bgutil-ytdlp-pot-provider
-jiosaavn
+jiosaavn-python
