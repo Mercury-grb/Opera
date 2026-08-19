@@ -1,0 +1,9 @@
+tgcrypto
+yt-dlp
+spotipy
+beautifulsoup4
+requests
+python-dotenv
+aiosqlite
+pillow
+aiohttp
