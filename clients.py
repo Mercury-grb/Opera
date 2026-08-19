@@ -2,15 +2,17 @@ from pyrogram import Client
 from pytgcalls import PyTgCalls
 import config
 
+# Populated by init_clients(), called once inside main()'s running loop.
+# Stays None until then. Plugins should `import clients` and reference
+# clients.assistant / clients.call_py at CALL TIME inside handler
+# functions (not at import time) — by the time any command actually runs,
+# startup has already completed and these are populated.
+assistant: Client | None = None
+call_py: PyTgCalls | None = None
 
-# IMPORTANT: don't construct Client()/PyTgCalls() at module import time.
-# Pyrogram's Client.__init__ caches whatever event loop is "current" at
-# construction — but module-level code runs BEFORE asyncio.run(main())
-# ever creates the actual running loop, so it binds to a throwaway loop
-# instead of the real one. That mismatch is exactly the "attached to a
-# different loop" error. Fix: build these lazily, from inside the running
-# loop (called once, early, in main()).
-def build_clients():
+
+def init_clients():
+    global assistant, call_py
     assistant = Client(
         "assistant_session",
         api_id=config.API_ID,
@@ -20,3 +22,4 @@ def build_clients():
     )
     call_py = PyTgCalls(assistant)
     return assistant, call_py
+    
