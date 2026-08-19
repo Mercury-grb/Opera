@@ -106,34 +106,25 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
 
 
 def _ytdlp_extract(query: str) -> dict:
-    """Blocking — always call via asyncio.to_thread."""
     ydl_opts = {
         "format": "bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "default_search": "ytsearch",
-        # YouTube's bot detection ("Sign in to confirm you're not a bot")
-        # is common on datacenter IPs like Render's. The android/ios player
-        # clients often avoid it without cookies, but can return a
-        # narrower format list for some videos ("Requested format is not
-        # available"). Now that cookies are configured (see below), it's
-        # safe to include the web client too — cookies cover its bot-check
-        # — which gives yt-dlp more formats to choose from per video.
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web", "ios"],
+                # Prioritize 'web' or use 'default'. 
+                # 'android' often hides 'bestaudio' formats now.
+                "player_client": ["web", "default"], 
             },
-            # bgutil-ytdlp-pot-provider (installed via requirements.txt,
-            # requires Node.js — see Dockerfile) generates the PO token
-            # YouTube now requires to serve real formats. "script" mode
-            # runs its bundled JS directly via node with no separate
-            # server process to manage — simplest for a single container.
             "youtubepot-bgutilscript": {
                 "script_path": ["auto"],
             },
         },
     }
+    # ... rest of your code ...
+    
     # Cookies fallback for YouTube's bot detection — see
     # _get_writable_cookies_path() for why we copy it to /tmp first.
     cookies_file = _get_writable_cookies_path()
