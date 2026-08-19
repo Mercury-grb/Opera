@@ -1,5 +1,5 @@
 tgcrypto
-yt-dlp
+yt-dlp>=2026.7.4
 spotipy
 beautifulsoup4
 requests
@@ -8,4 +8,4 @@ aiosqlite
 pillow
 aiohttp
 aiogram
-kurigram
+Kurigram
