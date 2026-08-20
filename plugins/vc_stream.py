@@ -15,12 +15,12 @@ def _controls_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⏸ Pause", callback_data="vc:pause"),
-                InlineKeyboardButton(text="▶️ Resume", callback_data="vc:resume"),
+                InlineKeyboardButton(text="⏸ ", callback_data="vc:pause"),
+                InlineKeyboardButton(text="▶️ ", callback_data="vc:resume"),
             ],
             [
-                InlineKeyboardButton(text="🔁 Repeat", callback_data="vc:repeat"),
-                InlineKeyboardButton(text="⏹ Stop", callback_data="vc:stop"),
+                InlineKeyboardButton(text="🔁 ", callback_data="vc:repeat"),
+                InlineKeyboardButton(text="⏹ ", callback_data="vc:stop"),
             ],
         ]
     )
@@ -61,12 +61,19 @@ async def _send_now_playing(message: Message, chat_id: int):
         )
         
 
-async def _start_track(chat_id: int, track: dict):
-    """Actually start playing a resolved track dict via PyTgCalls, and
-    record it as now_playing."""
-    await clients.call_py.play(chat_id, MediaStream(track["url"]))
-    sm.now_playing[chat_id] = track
 
+async def _start_track(chat_id: int, track: dict):
+    """Actually start playing a resolved track dict via PyTgCalls."""
+    
+    # Explicitly tell FFmpeg to stream audio only and ignore missing video tracks
+    stream = MediaStream(
+        track["url"],
+        video_flags=MediaStream.Flags.IGNORE
+    )
+    
+    await clients.call_py.play(chat_id, stream)
+    sm.now_playing[chat_id] = track
+    
 
 async def _play_next_or_leave(chat_id: int):
     """Called when a track finishes (or is skipped). Pulls the next item
