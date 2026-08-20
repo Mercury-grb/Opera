@@ -11,12 +11,10 @@ import aiohttp
 import yt_dlp
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-from jiosaavn import JioSaavn
 import config
 
 log = logging.getLogger("bot")
 
-_saavn = JioSaavn()
 PLAYLISTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playlists.json")
 
 # --- Per-chat state ---
@@ -84,14 +82,36 @@ async def _piped_extract_async(query: str) -> dict:
         raise ValueError("Failed to fetch audio stream. Proxies may be overloaded.")
 
 async def _resolve_via_jiosaavn(query: str) -> dict | None:
-    """Resolve track using JioSaavn, including thumbnail extraction."""
+    """Resolve track using JioSaavn's actual song-search endpoint directly.
+
+    NOTE: the jiosaavn-python library's search_songs() was found (via logs)
+    to call JioSaavn's autocomplete.get endpoint instead of a real search —
+    that endpoint only returns typeahead suggestions with no downloadUrl
+    field, so every lookup silently came back empty. Calling the real
+    search.getResults endpoint ourselves avoids depending on the library's
+    (apparently wrong) internal routing.
+    """
+    url = "https://www.jiosaavn.com/api.php"
+    params = {
+        "__call": "search.getResults",
+        "q": query,
+        "_format": "json",
+        "_marker": "0",
+        "ctx": "web6dot0",
+        "p": "1",
+        "n": "1",
+    }
     try:
-        results = await _saavn.search_songs(query)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=8) as res:
+                if res.status != 200:
+                    return None
+                data = await res.json(content_type=None)
     except Exception as e:
-        log.warning(f"[JIOSAAVN] Search failed: {e}")
+        log.warning(f"[JIOSAAVN] Search request failed: {e}")
         return None
 
-    songs = results.get("results") if isinstance(results, dict) else results
+    songs = data.get("results") if isinstance(data, dict) else data
     if not songs:
         return None
 
