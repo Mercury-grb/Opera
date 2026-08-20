@@ -84,23 +84,16 @@ async def _piped_extract_async(query: str) -> dict:
 async def _resolve_via_jiosaavn(query: str) -> dict | None:
     """Resolve track using JioSaavn's actual song-search endpoint directly.
 
-    NOTE: the jiosaavn-python library's search_songs() was found (via logs)
-    to call JioSaavn's autocomplete.get endpoint instead of a real search —
-    that endpoint only returns typeahead suggestions with no downloadUrl
-    field, so every lookup silently came back empty. Calling the real
-    search.getResults endpoint ourselves avoids depending on the library's
-    (apparently wrong) internal routing.
+    NOTE: JioSaavn's own raw internal API (www.jiosaavn.com/api.php) is
+    undocumented and its older endpoints historically return ENCRYPTED
+    media URLs that need special decryption before they're actually
+    playable — which is the likely reason a "url" was being found but
+    nothing would play. Using saavn.dev instead: a documented, widely-used
+    public wrapper that returns clean, already-decrypted direct stream
+    URLs in a known JSON shape, no decryption needed on our end.
     """
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
-        "__call": "search.getResults",
-        "q": query,
-        "_format": "json",
-        "_marker": "0",
-        "ctx": "web6dot0",
-        "p": "1",
-        "n": "1",
-    }
+    url = "https://saavn.dev/api/search/songs"
+    params = {"query": query, "limit": 1}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=8) as res:
@@ -111,24 +104,22 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
         log.warning(f"[JIOSAAVN] Search request failed: {e}")
         return None
 
-    songs = data.get("results") if isinstance(data, dict) else data
+    songs = data.get("data", {}).get("results") if isinstance(data, dict) else None
     if not songs:
         return None
 
     song = songs[0]
     url = None
     if isinstance(song.get("downloadUrl"), list) and song["downloadUrl"]:
-        url = song["downloadUrl"][-1].get("link") or song["downloadUrl"][-1].get("url")
-    elif isinstance(song.get("download_url"), list) and song["download_url"]:
-        url = song["download_url"][-1].get("link") or song["download_url"][-1].get("url")
-    else:
-        url = song.get("media_url") or song.get("media_preview_url") or song.get("url")
+        # List sorted low->high quality; last entry is the best available.
+        url = song["downloadUrl"][-1].get("url") or song["downloadUrl"][-1].get("link")
 
     if not url:
+        log.info(f"[JIOSAAVN] No downloadUrl found. Raw song: {json.dumps(song)[:500]}")
         return None
 
-    title = song.get("song") or song.get("name") or song.get("title") or query
-    
+    title = song.get("name") or song.get("song") or query
+
     duration = song.get("duration") or 0
     try:
         duration = int(duration)
@@ -137,9 +128,7 @@ async def _resolve_via_jiosaavn(query: str) -> dict | None:
 
     image_url = None
     if isinstance(song.get("image"), list) and song["image"]:
-        image_url = song["image"][-1].get("link") or song["image"][-1].get("url")
-    elif isinstance(song.get("image_url"), list) and song["image_url"]:
-        image_url = song["image_url"][-1].get("link") or song["image_url"][-1].get("url")
+        image_url = song["image"][-1].get("url") or song["image"][-1].get("link")
     elif isinstance(song.get("image"), str):
         image_url = song.get("image")
 
