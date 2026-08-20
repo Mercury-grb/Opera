@@ -15,12 +15,11 @@ def _controls_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⏸ ", callback_data="vc:pause"),
-                InlineKeyboardButton(text="▶️ ", callback_data="vc:resume"),
-            ],
-            [
-                InlineKeyboardButton(text="🔁 ", callback_data="vc:repeat"),
-                InlineKeyboardButton(text="⏹ ", callback_data="vc:stop"),
+                InlineKeyboardButton(text="⏸", callback_data="vc:pause"),
+                InlineKeyboardButton(text="▶️", callback_data="vc:resume"),
+            
+                InlineKeyboardButton(text="🔁", callback_data="vc:repeat"),
+                InlineKeyboardButton(text="⏹", callback_data="vc:stop"),
             ],
         ]
     )
@@ -38,42 +37,26 @@ def _now_playing_text(chat_id: int) -> str:
         f"**Requested By :** {np['requested_by']}\n"
         f"**Repeat :** {'On' if repeat_on else 'Off'} ❞"
     )
-async def _send_now_playing(message: Message, chat_id: int):
-    """Helper to send the now playing panel with a thumbnail if available."""
-    np = sm.now_playing.get(chat_id)
-    if not np:
-        return
-
-    text = _now_playing_text(chat_id)
-    thumb_url = np.get("thumbnail")
-
-    # If a thumbnail exists, send a photo with a caption. Otherwise, fallback to text.
-    if thumb_url:
-        await message.answer_photo(
-            photo=thumb_url, 
-            caption=text, 
-            reply_markup=_controls_keyboard()
-        )
-    else:
-        await message.answer(
-            text=text, 
-            reply_markup=_controls_keyboard()
-        )
-        
 
 
 async def _start_track(chat_id: int, track: dict):
-    """Actually start playing a resolved track dict via PyTgCalls."""
-    
-    # Explicitly tell FFmpeg to stream audio only and ignore missing video tracks
-    stream = MediaStream(
-        track["url"],
-        video_flags=MediaStream.Flags.IGNORE
+    """Actually start playing a resolved track dict via PyTgCalls, and
+    record it as now_playing.
+
+    IMPORTANT: video_flags=MediaStream.Flags.IGNORE tells PyTgCalls this
+    source is audio-only. Without it, PyTgCalls' underlying engine expects
+    both an audio and video track by default — for an audio-only URL
+    (which has no video track at all), that can result in the assistant
+    successfully joining the voice chat (a separate step) while audio
+    playback itself never actually starts. That mismatch is exactly what
+    "joins the VC but no audio plays" looks like.
+    """
+    await clients.call_py.play(
+        chat_id,
+        MediaStream(track["url"], video_flags=MediaStream.Flags.IGNORE),
     )
-    
-    await clients.call_py.play(chat_id, stream)
     sm.now_playing[chat_id] = track
-    
+
 
 async def _play_next_or_leave(chat_id: int):
     """Called when a track finishes (or is skipped). Pulls the next item
@@ -136,8 +119,7 @@ async def play_handler(message: Message, command: CommandObject):
         return
 
     await status.delete()
-    await _send_now_playing(message, chat_id)
-
+    await message.answer(_now_playing_text(chat_id), reply_markup=_controls_keyboard())
 
 
 @router.message(Command("pause"))
@@ -183,7 +165,7 @@ async def skip_handler(message: Message):
     await _play_next_or_leave(chat_id)
     sm.repeat_flags[chat_id] = was_repeat
     if chat_id in sm.now_playing:
-        await _send_now_playing(message, chat_id)
+        await message.answer(_now_playing_text(chat_id), reply_markup=_controls_keyboard())
     else:
         await message.reply("Queue is empty — left the voice chat.")
 
@@ -259,8 +241,7 @@ async def play_playlist_handler(message: Message, command: CommandObject):
         return
 
     await status.delete()
-    await _send_now_playing(message, chat_id)
-    
+    await message.answer(_now_playing_text(chat_id), reply_markup=_controls_keyboard())
 
 
 @router.message(Command("playlists"))
@@ -310,12 +291,7 @@ async def stream_controls(callback: CallbackQuery):
         state = "on" if sm.repeat_flags[chat_id] else "off"
         await callback.answer(f"Repeat {state}")
         try:
-            # Check if the message has a photo to decide between edit_caption and edit_text
-            new_text = _now_playing_text(chat_id)
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=new_text, reply_markup=_controls_keyboard())
-            else:
-                await callback.message.edit_text(text=new_text, reply_markup=_controls_keyboard())
+            await callback.message.edit_text(_now_playing_text(chat_id), reply_markup=_controls_keyboard())
         except Exception:
             pass
 
@@ -327,14 +303,9 @@ async def stream_controls(callback: CallbackQuery):
         sm.clear_chat(chat_id)
         await callback.answer("Stopped")
         try:
-            stop_text = "Stopped streaming and left the voice chat. Queue cleared."
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=stop_text)
-            else:
-                await callback.message.edit_text(text=stop_text)
+            await callback.message.edit_text("Stopped streaming and left the voice chat. Queue cleared.")
         except Exception:
             pass
-            
 
 
 # --- PyTgCalls stream-end event ---
